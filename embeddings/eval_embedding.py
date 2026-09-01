@@ -1055,13 +1055,6 @@ def parse_args():
         required=True,
     )
 
-    # load_data() expects this device for embeddings.
-    parser.add_argument(
-        "--embedding_device",
-        type=str,
-        default="cpu",
-    )
-
     parser.add_argument(
         "--device",
         type=str,
