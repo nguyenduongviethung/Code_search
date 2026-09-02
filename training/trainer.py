@@ -87,21 +87,11 @@ def compute_metrics(
     """
     logger.info("Computing metrics...")
 
-    score_list: list[torch.Tensor] = []
-    for start in range(0, len(text_data), args.eval_batch_size):
-        end = min(start + args.eval_batch_size, len(text_data))
-
-        batch_scores, _ = handler.compute_scores(
-            args,
-            text_data=text_data,
-            emb_data=emb_data,
-            query_idx=list(range(start, end)),
-            cand_idx=[list(range(len(text_data)))] * (end - start)
-        )
-
-        score_list.append(batch_scores.cpu())
-
-    scores = torch.cat(score_list, dim=0)
+    scores = handler.compute_eval_scores(
+        args,
+        text_data=text_data,
+        emb_data=emb_data,
+    )
 
     # Because query_embeddings and code_embeddings are constructed
     # from the same ordered pair_indices list, position i contains

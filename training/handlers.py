@@ -21,6 +21,14 @@ class BaseModelHandler:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError()
 
+    def compute_eval_scores(
+        self,
+        args: argparse.Namespace,
+        text_data: list[dict[str, str]],
+        emb_data: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        raise NotImplementedError()
+
     def save_model(self, args: argparse.Namespace):
         raise NotImplementedError()
 
@@ -119,7 +127,7 @@ class ModelEmbeddingHandler(BaseModelHandler):
         flatten_comment_emb = None
         if args.use_comment:
             assert comment_text is not None
-            flatten_comment_emb = self.embedding_model.get_embedding(args.device, comment_text, args.code_length)
+            flatten_comment_emb = self.embedding_model.get_embedding(args.device, comment_text, args.nl_length)
 
         # Reshape code and comment embeddings to [B, N, D]
         B = len(query_idx)
@@ -158,6 +166,77 @@ class ModelEmbeddingHandler(BaseModelHandler):
         scores = (args.w1 * q2c_scores + args.w2 * q2com_scores + args.w3 * c2c_scores) / (args.w1 + args.w2 + args.w3)
 
         return scores, mask
+
+    
+
+    @override
+    def compute_eval_scores(
+        self,
+        args: argparse.Namespace,
+        text_data: list[dict[str, str]],
+        emb_data: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        """
+        Compute scores for all queries and candidates in the dataset.
+
+        Returns:
+            scores: Tensor [num_queries, num_candidates]
+        """
+        batch_size = args.eval_batch_size
+        N = len(text_data)
+
+        query_embeddings = []
+        for start in range(0, N, batch_size):
+            end = min(start + batch_size, N)
+            query_text = [text_data[i]["query"] for i in range(start, end)]
+            query_emb = self.embedding_model.get_embedding(args.device, query_text, args.nl_length)
+            query_embeddings.append(query_emb)
+
+        query_embeddings = torch.cat(query_embeddings, dim=0)
+
+        code_embeddings = []
+        for start in range(0, N, batch_size):
+            end = min(start + batch_size, N)
+            code_text = [text_data[i]["code"] for i in range(start, end)]
+            code_emb = self.embedding_model.get_embedding(args.device, code_text, args.code_length)
+            code_embeddings.append(code_emb)
+        code_embeddings = torch.cat(code_embeddings, dim=0)
+
+        comment_embeddings = None
+        if args.use_comment:
+            comment_embeddings = []
+            for start in range(0, N, batch_size):
+                end = min(start + batch_size, N)
+                comment_text = [text_data[i]["comment"] for i in range(start, end)]
+                comment_emb = self.embedding_model.get_embedding(args.device, comment_text, args.nl_length)
+                comment_embeddings.append(comment_emb)
+            comment_embeddings = torch.cat(comment_embeddings, dim=0)
+
+        gencode_embeddings = None
+        if args.use_gencode:
+            gencode_embeddings = []
+            for start in range(0, N, batch_size):
+                end = min(start + batch_size, N)
+                gencode_text = [text_data[i]["gencode"] for i in range(start, end)]
+                gencode_emb = self.embedding_model.get_embedding(args.device, gencode_text, args.code_length)
+                gencode_embeddings.append(gencode_emb)
+            gencode_embeddings = torch.cat(gencode_embeddings, dim=0)
+
+        # Compute scores
+        q2c_scores = torch.einsum("qd,cd->qc", query_embeddings, code_embeddings)
+        q2com_scores = torch.zeros_like(q2c_scores)
+        c2c_scores = torch.zeros_like(q2c_scores)
+
+        if args.use_comment:
+            assert comment_embeddings is not None
+            q2com_scores = torch.einsum("qd,cd->qc", query_embeddings, comment_embeddings)
+
+        if args.use_gencode:
+            assert gencode_embeddings is not None
+            c2c_scores = torch.einsum("qd,cd->qc", gencode_embeddings, code_embeddings)
+
+        scores = (args.w1 * q2c_scores + args.w2 * q2com_scores + args.w3 * c2c_scores) / (args.w1 + args.w2 + args.w3)
+        return scores
 
     def train(self):
         self.embedding_model.train()
