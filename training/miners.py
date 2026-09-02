@@ -33,10 +33,10 @@ def static_negative_mining(
     # Move ALL candidate embeddings to GPU once
     q2c_code = emb_data["q2c_code"].to(device)
     q2com_comment = emb_data["q2com_comment"].to(device) if args.use_comment else None
-    c2c_code = emb_data["c2c_code"].to(device)
+    c2c_code = emb_data["c2c_code"].to(device) if args.use_gencode else None
 
     q2c_query = emb_data["q2c_query"]
-    q2com_query = emb_data["q2com_query"]
+    q2com_query = emb_data["q2com_query"] if args.use_comment else None
     c2c_gencode = emb_data["c2c_gencode"] if args.use_gencode else None
 
     samples: list[tuple[int, list[int]]] = []
@@ -51,7 +51,11 @@ def static_negative_mining(
         # Slice batch 
         # =========================
         q_batch = q2c_query[i:i+B].to(args.device)
-        qcom_batch = q2com_query[i:i+B].to(args.device)
+
+        qcom_batch = None
+        if args.use_comment:
+            assert q2com_query is not None
+            qcom_batch = q2com_query[i:i+B].to(args.device)
 
         gencode_batch = None
         if args.use_gencode:
@@ -155,10 +159,10 @@ def dynamic_negative_mining(
     # preload embeddings (same as static mining)
     q2c_code = emb_data["q2c_code"].to(device)
     q2com_comment = emb_data["q2com_comment"].to(device) if args.use_comment else None
-    c2c_code = emb_data["c2c_code"].to(device)
+    c2c_code = emb_data["c2c_code"].to(device) if args.use_gencode else None
 
     q2c_query = emb_data["q2c_query"]
-    q2com_query = emb_data["q2com_query"]
+    q2com_query = emb_data["q2com_query"] if args.use_comment else None
     c2c_gencode = emb_data["c2c_gencode"] if args.use_gencode else None
 
     samples: list[tuple[int, list[int]]] = []
@@ -170,7 +174,11 @@ def dynamic_negative_mining(
             B = min(args.hn_batch_size, N - i)
 
             q_batch = q2c_query[i:i+B].to(device)
-            qcom_batch = q2com_query[i:i+B].to(device)
+
+            qcom_batch = None
+            if args.use_comment:
+                assert q2com_query is not None
+                qcom_batch = q2com_query[i:i+B].to(device)
 
             gen_batch = None
             if args.use_gencode:
