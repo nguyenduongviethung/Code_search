@@ -41,6 +41,8 @@ def train_epoch(
             cand_idx=[[query_idx[i]] for i in range(len(query_idx))],
         )
 
+        positive_score = positive_score.squeeze(1)
+
         negative_score, negative_mask = handler.compute_scores(
             args,
             text_data=text_data,
@@ -210,6 +212,7 @@ def fit(args: argparse.Namespace, logger: logging.Logger):
             samples = dynamic_negative_mining(
                 handler,
                 args,
+                logger,
                 text_data["train"],
                 emb_data["train"],
             )
@@ -220,8 +223,9 @@ def fit(args: argparse.Namespace, logger: logging.Logger):
             dataset,
             batch_size=args.train_batch_size,
             shuffle=True,
-            num_workers=args.num_workers,
+            num_workers=0,
             pin_memory=True,
+            collate_fn=collate_fn,
         )
 
         loss = train_epoch(

@@ -143,6 +143,7 @@ def static_negative_mining(
 def dynamic_negative_mining(
     handler: BaseModelHandler,
     args: argparse.Namespace,
+    logger: logging.Logger,
     text_data: list[dict[str, str]],
     emb_data: dict[str, torch.Tensor],
 ):
@@ -155,6 +156,7 @@ def dynamic_negative_mining(
     handler.eval()
 
     device = args.device
+    log_interval = max(1, len(text_data) // args.num_logs) if args.num_logs > 0 else len(text_data)
 
     # preload embeddings (same as static mining)
     q2c_code = emb_data["q2c_code"].to(device)
@@ -169,100 +171,102 @@ def dynamic_negative_mining(
     N = q2c_query.size(0)
     K0 = args.dynamic_negatives_per_source
 
-    with torch.no_grad():
-        for i in range(0, N, args.hn_batch_size):
-            B = min(args.hn_batch_size, N - i)
+    for i in range(0, N, args.hn_batch_size):
+        B = min(args.hn_batch_size, N - i)
 
-            q_batch = q2c_query[i:i+B].to(device)
+        q_batch = q2c_query[i:i+B].to(device)
 
-            qcom_batch = None
+        qcom_batch = None
+        if args.use_comment:
+            assert q2com_query is not None
+            qcom_batch = q2com_query[i:i+B].to(device)
+
+        gen_batch = None
+        if args.use_gencode:
+            assert c2c_gencode is not None
+            gen_batch = c2c_gencode[i:i+B].to(device)
+
+        # =========================
+        # compute 3 similarity scores
+        # =========================
+        s1 = q_batch @ q2c_code.T
+
+        s2 = None
+        if args.use_comment:
+            assert qcom_batch is not None and q2com_comment is not None
+            s2 = qcom_batch @ q2com_comment.T
+
+        s3 = None
+        if args.use_gencode:
+            assert gen_batch is not None and c2c_code is not None
+            s3 = gen_batch @ c2c_code.T
+
+        # =========================
+        # mask positive
+        # =========================
+        row = torch.arange(B, device=device)
+        col = torch.arange(i, i+B, device=device)
+        
+        s1[row, col] = -torch.inf
+
+        if args.use_comment:
+            assert s2 is not None
+            s2[row, col] = -torch.inf
+
+        if args.use_gencode:
+            assert s3 is not None
+            s3[row, col] = -torch.inf
+        
+        # =========================
+        # top-k candidates from each
+        # =========================
+        idx1 = torch.topk(s1, K0, dim=1).indices
+
+        idx2 = None
+        if args.use_comment:
+            assert s2 is not None
+            idx2 = torch.topk(s2, K0, dim=1).indices
+
+        idx3 = None
+        if args.use_gencode:
+            assert s3 is not None
+            idx3 = torch.topk(s3, K0, dim=1).indices
+
+        positive: list[int] = [i + b for b in range(B)]
+        candidates: list[list[int]] = []
+
+        for b in range(B):
+            negs = idx1[b].tolist()
+
             if args.use_comment:
-                assert q2com_query is not None
-                qcom_batch = q2com_query[i:i+B].to(device)
-
-            gen_batch = None
-            if args.use_gencode:
-                assert c2c_gencode is not None
-                gen_batch = c2c_gencode[i:i+B].to(device)
-
-            # =========================
-            # compute 3 similarity scores
-            # =========================
-            s1 = q_batch @ q2c_code.T
-
-            s2 = None
-            if args.use_comment:
-                assert qcom_batch is not None and q2com_comment is not None
-                s2 = qcom_batch @ q2com_comment.T
-
-            s3 = None
-            if args.use_gencode:
-                assert gen_batch is not None and c2c_code is not None
-                s3 = gen_batch @ c2c_code.T
-
-            # =========================
-            # mask positive
-            # =========================
-            row = torch.arange(B, device=device)
-            col = torch.arange(i, i+B, device=device)
-            
-            s1[row, col] = -torch.inf
-
-            if args.use_comment:
-                assert s2 is not None
-                s2[row, col] = -torch.inf
+                assert idx2 is not None
+                negs += idx2[b].tolist()
 
             if args.use_gencode:
-                assert s3 is not None
-                s3[row, col] = -torch.inf
-            
-            # =========================
-            # top-k candidates from each
-            # =========================
-            idx1 = torch.topk(s1, K0, dim=1).indices
+                assert idx3 is not None
+                negs += idx3[b].tolist()
 
-            idx2 = None
-            if args.use_comment:
-                assert s2 is not None
-                idx2 = torch.topk(s2, K0, dim=1).indices
+            candidates.append(list(set(negs)))  # remove duplicates
 
-            idx3 = None
-            if args.use_gencode:
-                assert s3 is not None
-                idx3 = torch.topk(s3, K0, dim=1).indices
+        scores, mask = handler.compute_scores(
+            args,
+            text_data,
+            emb_data,
+            positive,
+            candidates
+        )
 
-            positive: list[int] = [i + b for b in range(B)]
-            candidates: list[list[int]] = []
+        for b in range(B):
+            # filter out padding candidates
+            valid_scores = scores[b][mask[b].bool()]
 
-            for b in range(B):
-                negs = idx1[b].tolist()
+            indicies: list[int] = torch.topk(valid_scores, args.dynamic_topk, largest=True).indices.tolist()
 
-                if args.use_comment:
-                    assert idx2 is not None
-                    negs += idx2[b].tolist()
+            negatves = [candidates[b][n] for n in indicies]
 
-                if args.use_gencode:
-                    assert idx3 is not None
-                    negs += idx3[b].tolist()
+            samples.append((positive[b], negatves))
 
-                candidates.append(list(set(negs)))  # remove duplicates
-
-            scores, mask = handler.compute_scores(
-                args,
-                text_data,
-                emb_data,
-                positive,
-                candidates
-            )
-
-            for b in range(B):
-                # filter out padding candidates
-                valid_scores = scores[b][mask[b].bool()]
-
-                indicies: list[int] = torch.topk(valid_scores, args.dynamic_topk, largest=True).indices.tolist()
-
-                negatves = [candidates[b][n] for n in indicies]
-
-                samples.append((positive[b], negatves))
+        if logger and ((i + B) % log_interval == 0 or (i + B) >= N):
+            logger.info(f"[HN] {i+B}/{N} ({(i+B)/N:.1%})")
 
     return samples

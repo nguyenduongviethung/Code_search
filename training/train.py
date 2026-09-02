@@ -233,15 +233,24 @@ def parse_args():
     # =========================
     # Runtime
     # =========================
+    
     parser.add_argument(
         "--device",
         type=str,
         default="cuda" if torch.cuda.is_available() else "cpu",
     )
+
     parser.add_argument(
         "--seed",
         type=int,
         default=42,
+    )
+
+    parser.add_argument(
+        "--num_logs",
+        type=int,
+        default=10,
+        help="Number of logs to print during hard negative mining.",
     )
 
     return parser.parse_args()
