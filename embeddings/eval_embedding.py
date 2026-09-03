@@ -82,6 +82,7 @@ def _truncate_text(
 def save_top10_results(
     output_path: str,
     test_data: list[dict[str, str]],
+    best_scores: torch.Tensor,
     best_indices: torch.Tensor,
     q_start: int,
     max_text_len: int = 200,
@@ -98,6 +99,7 @@ def save_top10_results(
         "weight configuration at a time."
     )
 
+    top_scores = best_scores[:, 0].detach().cpu()
     top_indices = best_indices[:, 0].detach().cpu()
 
     file_exists = os.path.exists(
@@ -119,6 +121,7 @@ def save_top10_results(
                 "query_text",
                 "target_index",
                 "rank",
+                "score",
                 "candidate_index",
                 "candidate_id",
                 "candidate_text",
@@ -153,6 +156,12 @@ def save_top10_results(
             target_idx = query_idx
 
             for rank in range(10):
+                score = float(
+                    top_scores[
+                        local_q_idx,
+                        rank,
+                    ].item()
+                )
 
                 code_idx = int(top_indices[
                     local_q_idx,
@@ -181,6 +190,7 @@ def save_top10_results(
                     "query_text": query_text,
                     "target_index": target_idx,
                     "rank": rank + 1,
+                    "score": score,
                     "candidate_index": code_idx,
                     "candidate_id": code_item["id"],
                     "candidate_text": code_text,
@@ -693,6 +703,7 @@ def evaluate(
             save_top10_results(
                 output_path=top10_output_path,
                 test_data=test_data,
+                best_scores=best_scores,
                 best_indices=best_indices,
                 q_start=q_start,
                 max_text_len=args.top10_text_len,
