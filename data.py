@@ -297,7 +297,7 @@ def build_split_indices(
             ][modality_idx]
 
             # Require same split
-            if modality_item["split"] != split:
+            if "split" in modality_item and modality_item["split"] != split:
                 skipped_mismatch += 1
                 valid_sample = False
                 break
