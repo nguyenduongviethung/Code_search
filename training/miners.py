@@ -331,7 +331,7 @@ def dynamic_negative_mining(
             elif args.miner_mode == "threshold":
                 indices = threshold_topk(
                     valid_scores.unsqueeze(0),
-                    pos_score[b].unsqueeze(0),
+                    pos_score[b],
                     args.miner_threshold,
                     args.max_negatives,
                 )[0]
@@ -339,9 +339,9 @@ def dynamic_negative_mining(
             else:
                 raise ValueError(f"Unknown miner_mode: {args.miner_mode}")
 
-            negatves = [candidates[b][n] for n in indices]
+            negatives = [candidates[b][n] for n in indices]
 
-            samples.append((positive[b], negatves))
+            samples.append((positive[b], negatives))
 
         if logger and ((i + B) % log_interval == 0 or (i + B) >= N):
             logger.info(f"[HN] {i+B}/{N} ({(i+B)/N:.1%})")
