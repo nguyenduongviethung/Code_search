@@ -212,6 +212,13 @@ def parse_args():
     # Hard Negative Mining
     # =========================
     parser.add_argument(
+        "--miner_mode",
+        type=str,
+        default="topk",
+        choices=["topk", "threshold"],
+    )
+
+    parser.add_argument(
         "--static_topk",
         type=int,
         default=4
@@ -228,6 +235,13 @@ def parse_args():
         "--dynamic_topk",
         type=int,
         default=4
+    )
+
+    parser.add_argument(
+        "--miner_threshold",
+        type=float,
+        default=0.05,
+        help="Threshold for selecting hard negatives.",
     )
 
     # =========================

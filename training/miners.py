@@ -84,30 +84,64 @@ def static_negative_mining(
         row = torch.arange(B, device=device)
         col = torch.arange(i, i + B, device=device)
 
+        positive_scores1 = s1[row, col].clone()
         s1[row, col] = -torch.inf
 
+        positive_scores2 = None
         if args.use_comment:
             assert s2 is not None
+            positive_scores2 = s2[row, col].clone()
             s2[row, col] = -torch.inf
 
+        positive_scores3 = None
         if args.use_gencode:
             assert s3 is not None
+            positive_scores3 = s3[row, col].clone()
             s3[row, col] = -torch.inf
 
-        # =========================
-        # top-k negatives
-        # =========================
-        idx1 = torch.topk(s1, args.static_topk, dim=1).indices
+        idx1: list[list[int]] | None = None
+        idx2: list[list[int]] | None = None
+        idx3: list[list[int]] | None = None
+        if args.miner_mode == "topk":
+            # =========================
+            # top-k negatives
+            # =========================
+            idx1 = torch.topk(s1, args.static_topk, dim=1).indices.tolist()
 
-        idx2 = None
-        if args.use_comment:
-            assert s2 is not None
-            idx2 = torch.topk(s2, args.static_topk, dim=1).indices
+            if args.use_comment:
+                assert s2 is not None
+                idx2 = torch.topk(s2, args.static_topk, dim=1).indices.tolist()
 
-        idx3 = None
-        if args.use_gencode:
-            assert s3 is not None
-            idx3 = torch.topk(s3, args.static_topk, dim=1).indices
+            if args.use_gencode:
+                assert s3 is not None
+                idx3 = torch.topk(s3, args.static_topk, dim=1).indices.tolist()
+
+        elif args.miner_mode == "threshold":
+            # =========================
+            # threshold negatives
+            # =========================
+            threshold = args.miner_threshold
+
+            idx1 = [
+                torch.where(s1[b] > positive_scores1[b] - threshold)[0].tolist()
+                for b in range(B)
+            ]
+
+            if args.use_comment:
+                assert s2 is not None and positive_scores2 is not None
+                idx2 = [
+                    torch.where(s2[b] > positive_scores2[b] - threshold)[0].tolist()
+                    for b in range(B)
+                ]
+
+            if args.use_gencode:
+                assert s3 is not None and positive_scores3 is not None
+                idx3 = [
+                    torch.where(s3[b] > positive_scores3[b] - threshold)[0].tolist()
+                    for b in range(B)
+                ]
+        else:
+            raise ValueError(f"Unknown miner_mode: {args.miner_mode}")
 
         # =========================
         # build samples
@@ -116,15 +150,15 @@ def static_negative_mining(
             positive = i + b
 
             # merge 3 sources of negatives
-            negatives = idx1[b].tolist()
+            negatives = idx1[b]
 
             if args.use_comment:
                 assert idx2 is not None
-                negatives += idx2[b].tolist()
+                negatives += idx2[b]
 
             if args.use_gencode:
                 assert idx3 is not None
-                negatives += idx3[b].tolist()
+                negatives += idx3[b]
 
             negatives = list(set(negatives))  # remove duplicates
 
@@ -248,7 +282,15 @@ def dynamic_negative_mining(
 
             candidates.append(list(set(negs)))  # remove duplicates
 
-        scores, mask = handler.compute_scores(
+        pos_score, _ = handler.compute_scores(
+            args,
+            text_data,
+            emb_data,
+            positive,
+            [[positive[b]] for b in range(B)]
+        )
+
+        neg_scores, neg_mask = handler.compute_scores(
             args,
             text_data,
             emb_data,
@@ -258,11 +300,20 @@ def dynamic_negative_mining(
 
         for b in range(B):
             # filter out padding candidates
-            valid_scores = scores[b][mask[b].bool()]
+            valid_scores = neg_scores[b][neg_mask[b].bool()]
 
-            indicies: list[int] = torch.topk(valid_scores, args.dynamic_topk, largest=True).indices.tolist()
+            indices: list[int]
 
-            negatves = [candidates[b][n] for n in indicies]
+            if args.miner_mode == "topk":
+                indices = torch.topk(valid_scores, args.dynamic_topk, largest=True).indices.tolist()
+
+            elif args.miner_mode == "threshold":
+                indices = torch.where(valid_scores > pos_score[b] - args.miner_threshold)[0].tolist()
+
+            else:
+                raise ValueError(f"Unknown miner_mode: {args.miner_mode}")
+
+            negatves = [candidates[b][n] for n in indices]
 
             samples.append((positive[b], negatves))
 
