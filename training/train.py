@@ -4,6 +4,7 @@ import logging
 
 import torch
 
+from training.losses import LOSSES
 from training.trainer import fit
 from utils import set_seed
 
@@ -161,11 +162,7 @@ def parse_args():
         "--loss_type",
         type=str,
         default="infonce",
-        choices=[
-            "infonce",
-            "bce_cosine",
-            "queue_infonce"
-        ],
+        choices=list(LOSSES.keys()),
     )
     
     parser.add_argument(
