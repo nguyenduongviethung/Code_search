@@ -241,6 +241,13 @@ def parse_args():
         help="Threshold for selecting hard negatives.",
     )
 
+    parser.add_argument(
+        "--max_negatives",
+        type=int,
+        default=-1,
+        help="Maximum number of negatives to keep. If -1, keep all.",
+    )
+
     # =========================
     # Runtime
     # =========================

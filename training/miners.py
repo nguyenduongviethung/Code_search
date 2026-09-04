@@ -6,6 +6,37 @@ import os
 
 from training.handlers import BaseModelHandler
 
+def threshold_topk(
+    scores: torch.Tensor,
+    positive_scores: torch.Tensor,
+    threshold: float,
+    max_negatives: int,
+) -> list[list[int]]:
+    """
+    Keep negatives satisfying:
+        score > positive_score - threshold
+
+    If too many satisfy the threshold, keep only the highest-scoring ones.
+    """
+
+    mask = scores > (positive_scores.unsqueeze(1) - threshold)
+
+    if max_negatives > 0:
+        filtered = scores.masked_fill(~mask, -torch.inf)
+
+        k = min(max_negatives, scores.size(1))
+        top_idx = torch.topk(filtered, k=k, dim=1).indices
+
+        return [
+            top_idx[b][torch.isfinite(filtered[b, top_idx[b]])].tolist()
+            for b in range(scores.size(0))
+        ]
+
+    return [
+        torch.where(mask[b])[0].tolist()
+        for b in range(scores.size(0))
+    ]
+
 @torch.no_grad()
 def static_negative_mining(
     args: argparse.Namespace,
@@ -122,24 +153,14 @@ def static_negative_mining(
             # =========================
             threshold = args.miner_threshold
 
-            idx1 = [
-                torch.where(s1[b] > positive_scores1[b] - threshold)[0].tolist()
-                for b in range(B)
-            ]
+            idx1 = threshold_topk(s1, positive_scores1, threshold, args.max_negatives)
 
             if args.use_comment:
                 assert s2 is not None and positive_scores2 is not None
-                idx2 = [
-                    torch.where(s2[b] > positive_scores2[b] - threshold)[0].tolist()
-                    for b in range(B)
-                ]
-
+                idx2 = threshold_topk(s2, positive_scores2, threshold, args.max_negatives)
             if args.use_gencode:
                 assert s3 is not None and positive_scores3 is not None
-                idx3 = [
-                    torch.where(s3[b] > positive_scores3[b] - threshold)[0].tolist()
-                    for b in range(B)
-                ]
+                idx3 = threshold_topk(s3, positive_scores3, threshold, args.max_negatives)
         else:
             raise ValueError(f"Unknown miner_mode: {args.miner_mode}")
 
@@ -308,7 +329,12 @@ def dynamic_negative_mining(
                 indices = torch.topk(valid_scores, args.dynamic_topk, largest=True).indices.tolist()
 
             elif args.miner_mode == "threshold":
-                indices = torch.where(valid_scores > pos_score[b] - args.miner_threshold)[0].tolist()
+                indices = threshold_topk(
+                    valid_scores.unsqueeze(0),
+                    pos_score[b].unsqueeze(0),
+                    args.miner_threshold,
+                    args.max_negatives,
+                )[0]
 
             else:
                 raise ValueError(f"Unknown miner_mode: {args.miner_mode}")
