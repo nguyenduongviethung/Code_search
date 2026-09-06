@@ -93,6 +93,7 @@ def compute_metrics(
         args,
         text_data=text_data,
         emb_data=emb_data,
+        batch_size=args.eval_batch_size
     )
 
     # Because query_embeddings and code_embeddings are constructed

@@ -26,6 +26,7 @@ class BaseModelHandler:
         args: argparse.Namespace,
         text_data: list[dict[str, str]],
         emb_data: dict[str, torch.Tensor],
+        batch_size: int
     ) -> torch.Tensor:
         raise NotImplementedError()
 
@@ -167,76 +168,202 @@ class ModelEmbeddingHandler(BaseModelHandler):
 
         return scores, mask
 
-    
-
     @override
     def compute_eval_scores(
         self,
         args: argparse.Namespace,
         text_data: list[dict[str, str]],
         emb_data: dict[str, torch.Tensor],
+        batch_size: int,
     ) -> torch.Tensor:
         """
         Compute scores for all queries and candidates in the dataset.
 
+        The embeddings are computed once, then the score matrix is computed
+        batch-by-batch over queries to avoid materializing the full [N, N]
+        matrix on GPU.
+
         Returns:
             scores: Tensor [num_queries, num_candidates]
         """
-        batch_size = args.eval_batch_size
         N = len(text_data)
+        device = args.device
 
+        # ============================================================
+        # Compute all query embeddings
+        # ============================================================
         query_embeddings = []
+
         for start in range(0, N, batch_size):
             end = min(start + batch_size, N)
-            query_text = [text_data[i]["query"] for i in range(start, end)]
-            query_emb = self.embedding_model.get_embedding(args.device, query_text, args.nl_length)
+
+            query_text = [
+                text_data[i]["query"]
+                for i in range(start, end)
+            ]
+
+            query_emb = self.embedding_model.get_embedding(
+                device,
+                query_text,
+                args.nl_length,
+            )
+
             query_embeddings.append(query_emb)
 
         query_embeddings = torch.cat(query_embeddings, dim=0)
 
+        # ============================================================
+        # Compute all code embeddings
+        # ============================================================
         code_embeddings = []
+
         for start in range(0, N, batch_size):
             end = min(start + batch_size, N)
-            code_text = [text_data[i]["code"] for i in range(start, end)]
-            code_emb = self.embedding_model.get_embedding(args.device, code_text, args.code_length)
+
+            code_text = [
+                text_data[i]["code"]
+                for i in range(start, end)
+            ]
+
+            code_emb = self.embedding_model.get_embedding(
+                device,
+                code_text,
+                args.code_length,
+            )
+
             code_embeddings.append(code_emb)
+
         code_embeddings = torch.cat(code_embeddings, dim=0)
 
+        # ============================================================
+        # Compute all comment embeddings
+        # ============================================================
         comment_embeddings = None
+
         if args.use_comment:
             comment_embeddings = []
+
             for start in range(0, N, batch_size):
                 end = min(start + batch_size, N)
-                comment_text = [text_data[i]["comment"] for i in range(start, end)]
-                comment_emb = self.embedding_model.get_embedding(args.device, comment_text, args.nl_length)
+
+                comment_text = [
+                    text_data[i]["comment"]
+                    for i in range(start, end)
+                ]
+
+                comment_emb = self.embedding_model.get_embedding(
+                    device,
+                    comment_text,
+                    args.nl_length,
+                )
+
                 comment_embeddings.append(comment_emb)
+
             comment_embeddings = torch.cat(comment_embeddings, dim=0)
 
+        # ============================================================
+        # Compute all gencode embeddings
+        # ============================================================
         gencode_embeddings = None
+
         if args.use_gencode:
             gencode_embeddings = []
+
             for start in range(0, N, batch_size):
                 end = min(start + batch_size, N)
-                gencode_text = [text_data[i]["gencode"] for i in range(start, end)]
-                gencode_emb = self.embedding_model.get_embedding(args.device, gencode_text, args.code_length)
+
+                gencode_text = [
+                    text_data[i]["gencode"]
+                    for i in range(start, end)
+                ]
+
+                gencode_emb = self.embedding_model.get_embedding(
+                    device,
+                    gencode_text,
+                    args.code_length,
+                )
+
                 gencode_embeddings.append(gencode_emb)
+
             gencode_embeddings = torch.cat(gencode_embeddings, dim=0)
 
-        # Compute scores
-        q2c_scores = torch.einsum("qd,cd->qc", query_embeddings, code_embeddings)
-        q2com_scores = torch.zeros_like(q2c_scores)
-        c2c_scores = torch.zeros_like(q2c_scores)
+        # ============================================================
+        # Compute score matrix batch-by-batch
+        #
+        # Instead of:
+        #
+        #   [N, D] @ [D, N] -> [N, N]
+        #
+        # we compute:
+        #
+        #   [B, D] @ [D, N] -> [B, N]
+        #
+        # ============================================================
+        score_batches = []
 
-        if args.use_comment:
-            assert comment_embeddings is not None
-            q2com_scores = torch.einsum("qd,cd->qc", query_embeddings, comment_embeddings)
+        weight_sum = args.w1 + args.w2 + args.w3
 
-        if args.use_gencode:
-            assert gencode_embeddings is not None
-            c2c_scores = torch.einsum("qd,cd->qc", gencode_embeddings, code_embeddings)
+        for start in range(0, N, batch_size):
+            end = min(start + batch_size, N)
 
-        scores = (args.w1 * q2c_scores + args.w2 * q2com_scores + args.w3 * c2c_scores) / (args.w1 + args.w2 + args.w3)
-        return scores
+            q_batch = query_embeddings[start:end]
+
+            # --------------------------------------------------------
+            # query -> code
+            # --------------------------------------------------------
+            q2c_scores = torch.einsum(
+                "bd,cd->bc",
+                q_batch,
+                code_embeddings,
+            )
+
+            # --------------------------------------------------------
+            # query -> comment
+            # --------------------------------------------------------
+            if args.use_comment:
+                assert comment_embeddings is not None
+
+                q2com_scores = torch.einsum(
+                    "bd,cd->bc",
+                    q_batch,
+                    comment_embeddings,
+                )
+            else:
+                q2com_scores = torch.zeros_like(q2c_scores)
+
+            # --------------------------------------------------------
+            # gencode -> code
+            # --------------------------------------------------------
+            if args.use_gencode:
+                assert gencode_embeddings is not None
+
+                gen_batch = gencode_embeddings[start:end]
+
+                c2c_scores = torch.einsum(
+                    "bd,cd->bc",
+                    gen_batch,
+                    code_embeddings,
+                )
+            else:
+                c2c_scores = torch.zeros_like(q2c_scores)
+
+            # --------------------------------------------------------
+            # Combine scores immediately
+            # --------------------------------------------------------
+            scores = (
+                args.w1 * q2c_scores
+                + args.w2 * q2com_scores
+                + args.w3 * c2c_scores
+            ) / weight_sum
+
+            # Move to CPU immediately so GPU memory stays bounded.
+            score_batches.append(scores.cpu())
+
+        # ============================================================
+        # Final [N, N] score matrix on CPU
+        # ============================================================
+        return torch.cat(score_batches, dim=0)
+
 
     def train(self):
         self.embedding_model.train()
