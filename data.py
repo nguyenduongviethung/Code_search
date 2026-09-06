@@ -272,6 +272,9 @@ def build_split_indices(
                 f"for sample '{sample_id}'"
             )
 
+        if split == "train" and len(query_item["nl"]) < getattr(args, "min_train_query_length", 0):
+            continue
+
         modality_indices = {
             "query": query_idx,
         }

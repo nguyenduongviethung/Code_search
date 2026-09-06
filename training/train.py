@@ -44,6 +44,12 @@ def parse_args():
         action="store_true"
     )
 
+    parser.add_argument(
+        "--min_train_query_length",
+        type=int,
+        default=0
+    )
+
     # =========================
     # Model
     # =========================
