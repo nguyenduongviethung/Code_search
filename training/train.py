@@ -215,6 +215,11 @@ def parse_args():
     # Hard Negative Mining
     # =========================
     parser.add_argument(
+        "--in_batch_negatives",
+        action="store_true",
+    )
+
+    parser.add_argument(
         "--miner_mode",
         type=str,
         default="topk",
@@ -225,13 +230,6 @@ def parse_args():
         "--static_topk",
         type=int,
         default=4
-    )
-
-    parser.add_argument(
-        "--dynamic_negatives_per_source",
-        type=int,
-        default=4,
-        help="Number of dynamic negatives sampled from each source.",
     )
 
     parser.add_argument(

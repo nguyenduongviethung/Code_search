@@ -39,6 +39,7 @@ def train_epoch(
             emb_data=emb_data,
             query_idx=query_idx,
             cand_idx=[[query_idx[i]] for i in range(len(query_idx))],
+            include_in_batch_negatives=False,
         )
 
         positive_score = positive_score.squeeze(1)
@@ -49,6 +50,7 @@ def train_epoch(
             emb_data=emb_data,
             query_idx=query_idx,
             cand_idx=cand_idx,
+            include_in_batch_negatives=args.in_batch_negatives
         )
 
         loss = loss_fn(
@@ -87,6 +89,8 @@ def compute_metrics(
     Returns:
         dict[str, float]: MRR, Top1, Top5, and Top10.
     """
+    handler.eval()
+
     logger.info("Computing metrics...")
 
     scores = handler.compute_eval_scores(

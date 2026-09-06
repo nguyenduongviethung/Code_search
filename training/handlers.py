@@ -17,7 +17,8 @@ class BaseModelHandler:
         text_data: list[dict[str, str]],
         emb_data: dict[str, torch.Tensor],
         query_idx: list[int],
-        cand_idx: list[list[int]]
+        cand_idx: list[list[int]],
+        include_in_batch_negatives: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError()
 
@@ -92,79 +93,380 @@ class ModelEmbeddingHandler(BaseModelHandler):
         text_data: list[dict[str, str]],
         emb_data: dict[str, torch.Tensor],
         query_idx: list[int],
-        cand_idx: list[list[int]]
+        cand_idx: list[list[int]],
+        include_in_batch_negatives: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Compute scores for a batch of queries and candidates.
 
+        If include_in_batch_negatives is True and args.in_batch_negatives
+        is enabled, positive candidates from other queries in the same
+        batch are prepended as additional negatives.
+
         Returns:
-            scores: Tensor [B, N]
-            mask: Tensor [B, N]
+            scores: Tensor [B, N + B - 1] when in-batch negatives are enabled,
+                    otherwise [B, N]
+            mask: Tensor [B, N + B - 1] when in-batch negatives are enabled,
+                otherwise [B, N]
         """
-        query_text = [text_data[i]["query"] for i in query_idx]
+        B = len(query_idx)
+
+        query_text = [
+            text_data[i]["query"]
+            for i in query_idx
+        ]
 
         gencode_text = None
         if args.use_gencode:
-            gencode_text = [text_data[i]["gencode"] for i in query_idx]
+            gencode_text = [
+                text_data[i]["gencode"]
+                for i in query_idx
+            ]
 
-        flatten_cand_idx = [i for sublist in cand_idx for i in sublist]
-
-        code_text = [text_data[i]["code"] for i in flatten_cand_idx]
-
-        comment_text = None
-        if args.use_comment:
-            comment_text = [text_data[i]["comment"] for i in flatten_cand_idx]
-
-        # Compute embeddings
-        query_emb = self.embedding_model.get_embedding(args.device, query_text, args.nl_length)
+        # ============================================================
+        # Compute query embeddings
+        # ============================================================
+        query_emb = self.embedding_model.get_embedding(
+            args.device,
+            query_text,
+            args.nl_length,
+        )
 
         gencode_emb = None
         if args.use_gencode:
             assert gencode_text is not None
-            gencode_emb = self.embedding_model.get_embedding(args.device, gencode_text, args.code_length)
 
-        flatten_code_emb = self.embedding_model.get_embedding(args.device, code_text, args.code_length)
+            gencode_emb = self.embedding_model.get_embedding(
+                args.device,
+                gencode_text,
+                args.code_length,
+            )
 
-        flatten_comment_emb = None
-        if args.use_comment:
-            assert comment_text is not None
-            flatten_comment_emb = self.embedding_model.get_embedding(args.device, comment_text, args.nl_length)
+        # ============================================================
+        # Flatten hard-negative candidates
+        # ============================================================
+        flatten_cand_idx = [
+            i
+            for sublist in cand_idx
+            for i in sublist
+        ]
 
-        # Reshape code and comment embeddings to [B, N, D]
-        B = len(query_idx)
-        N = max(len(cand) for cand in cand_idx)
-        D = flatten_code_emb.size(1)
+        # ============================================================
+        # Explicit hard-negative scores
+        #
+        # If there are no hard negatives, create [B, 0] tensors
+        # and DO NOT call the embedding model.
+        # ============================================================
+        if flatten_cand_idx:
+            code_text = [
+                text_data[i]["code"]
+                for i in flatten_cand_idx
+            ]
 
-        code_emb = torch.zeros(B, N, D, device=args.device)
-        comment_emb = None
-        mask = torch.zeros(B, N, device=args.device)
+            comment_text = None
+            if args.use_comment:
+                comment_text = [
+                    text_data[i]["comment"]
+                    for i in flatten_cand_idx
+                ]
 
-        for b in range(B):
-            mask[b, :len(cand_idx[b])] = 1
+            # --------------------------------------------------------
+            # Compute candidate embeddings
+            # --------------------------------------------------------
+            flatten_code_emb = self.embedding_model.get_embedding(
+                args.device,
+                code_text,
+                args.code_length,
+            )
 
-        code_emb[mask.bool()] = flatten_code_emb
+            flatten_comment_emb = None
+            if args.use_comment:
+                assert comment_text is not None
 
-        if args.use_comment:
-            assert flatten_comment_emb is not None
-            comment_emb = torch.zeros(B, N, D, device=args.device)
-            comment_emb[mask.bool()] = flatten_comment_emb
+                flatten_comment_emb = self.embedding_model.get_embedding(
+                    args.device,
+                    comment_text,
+                    args.nl_length,
+                )
 
-        # Compute scores
-        q2c_scores = torch.einsum("bd,bnd->bn", query_emb, code_emb)
+            # --------------------------------------------------------
+            # Reshape candidate embeddings to [B, N, D]
+            # --------------------------------------------------------
+            N = max(
+                len(cand)
+                for cand in cand_idx
+            )
 
-        if args.use_comment:
-            assert comment_emb is not None
-            q2com_scores = torch.einsum("bd,bnd->bn", query_emb, comment_emb)
+            D = flatten_code_emb.size(1)
+
+            code_emb = torch.zeros(
+                B,
+                N,
+                D,
+                device=args.device,
+                dtype=flatten_code_emb.dtype,
+            )
+
+            comment_emb = None
+
+            mask = torch.zeros(
+                B,
+                N,
+                device=args.device,
+                dtype=torch.bool,
+            )
+
+            offset = 0
+
+            for b in range(B):
+                num_candidates = len(cand_idx[b])
+
+                if num_candidates == 0:
+                    continue
+
+                mask[b, :num_candidates] = True
+
+                code_emb[
+                    b,
+                    :num_candidates
+                ] = flatten_code_emb[
+                    offset:offset + num_candidates
+                ]
+
+                if args.use_comment:
+                    assert flatten_comment_emb is not None
+
+                    if comment_emb is None:
+                        comment_emb = torch.zeros(
+                            B,
+                            N,
+                            D,
+                            device=args.device,
+                            dtype=flatten_comment_emb.dtype,
+                        )
+
+                    comment_emb[
+                        b,
+                        :num_candidates
+                    ] = flatten_comment_emb[
+                        offset:offset + num_candidates
+                    ]
+
+                offset += num_candidates
+
+            # --------------------------------------------------------
+            # query -> code
+            # --------------------------------------------------------
+            q2c_scores = torch.einsum(
+                "bd,bnd->bn",
+                query_emb,
+                code_emb,
+            )
+
+            # --------------------------------------------------------
+            # query -> comment
+            # --------------------------------------------------------
+            if args.use_comment:
+                assert comment_emb is not None
+
+                q2com_scores = torch.einsum(
+                    "bd,bnd->bn",
+                    query_emb,
+                    comment_emb,
+                )
+            else:
+                q2com_scores = torch.zeros_like(
+                    q2c_scores
+                )
+
+            # --------------------------------------------------------
+            # gencode -> code
+            # --------------------------------------------------------
+            if args.use_gencode:
+                assert gencode_emb is not None
+
+                c2c_scores = torch.einsum(
+                    "bd,bnd->bn",
+                    gencode_emb,
+                    code_emb,
+                )
+            else:
+                c2c_scores = torch.zeros_like(
+                    q2c_scores
+                )
+
+            weight_sum = (
+                args.w1
+                + args.w2
+                + args.w3
+            )
+
+            scores = (
+                args.w1 * q2c_scores
+                + args.w2 * q2com_scores
+                + args.w3 * c2c_scores
+            ) / weight_sum
+
         else:
-            q2com_scores = torch.zeros_like(q2c_scores)
+            # --------------------------------------------------------
+            # No hard negatives.
+            #
+            # IMPORTANT:
+            # Do not call embedding_model for empty candidate lists.
+            #
+            # scores: [B, 0]
+            # mask:   [B, 0]
+            # --------------------------------------------------------
+            scores = torch.empty(
+                B,
+                0,
+                device=args.device,
+                dtype=query_emb.dtype,
+            )
 
-        if args.use_gencode:
-            assert gencode_emb is not None
-            c2c_scores = torch.einsum("bd,bnd->bn", gencode_emb, code_emb)
-        else:
-            c2c_scores = torch.zeros_like(q2c_scores)
+            mask = torch.empty(
+                B,
+                0,
+                device=args.device,
+                dtype=torch.bool,
+            )
 
-        scores = (args.w1 * q2c_scores + args.w2 * q2com_scores + args.w3 * c2c_scores) / (args.w1 + args.w2 + args.w3)
+        # ============================================================
+        # In-batch negatives
+        #
+        # Only enabled when BOTH:
+        #
+        #   args.in_batch_negatives
+        #   include_in_batch_negatives
+        #
+        # The positive candidate belonging to query j is used as a
+        # negative for every query i != j.
+        #
+        # [B, B] -> [B, B - 1]
+        # ============================================================
+        if (
+            args.in_batch_negatives
+            and include_in_batch_negatives
+            and B > 1
+        ):
+            # --------------------------------------------------------
+            # Positive code embeddings
+            # --------------------------------------------------------
+            positive_code_text = [
+                text_data[i]["code"]
+                for i in query_idx
+            ]
+
+            positive_code_emb = self.embedding_model.get_embedding(
+                args.device,
+                positive_code_text,
+                args.code_length,
+            )
+
+            # query -> positive code
+            in_batch_q2c_scores = torch.einsum(
+                "bd,cd->bc",
+                query_emb,
+                positive_code_emb,
+            )
+
+            # --------------------------------------------------------
+            # query -> positive comment
+            # --------------------------------------------------------
+            if args.use_comment:
+                positive_comment_text = [
+                    text_data[i]["comment"]
+                    for i in query_idx
+                ]
+
+                positive_comment_emb = self.embedding_model.get_embedding(
+                    args.device,
+                    positive_comment_text,
+                    args.nl_length,
+                )
+
+                in_batch_q2com_scores = torch.einsum(
+                    "bd,cd->bc",
+                    query_emb,
+                    positive_comment_emb,
+                )
+            else:
+                in_batch_q2com_scores = torch.zeros_like(
+                    in_batch_q2c_scores
+                )
+
+            # --------------------------------------------------------
+            # gencode -> positive code
+            # --------------------------------------------------------
+            if args.use_gencode:
+                assert gencode_emb is not None
+
+                in_batch_c2c_scores = torch.einsum(
+                    "bd,cd->bc",
+                    gencode_emb,
+                    positive_code_emb,
+                )
+            else:
+                in_batch_c2c_scores = torch.zeros_like(
+                    in_batch_q2c_scores
+                )
+
+            # --------------------------------------------------------
+            # Combine
+            # --------------------------------------------------------
+            weight_sum = (
+                args.w1
+                + args.w2
+                + args.w3
+            )
+
+            in_batch_scores = (
+                args.w1 * in_batch_q2c_scores
+                + args.w2 * in_batch_q2com_scores
+                + args.w3 * in_batch_c2c_scores
+            ) / weight_sum
+
+            # --------------------------------------------------------
+            # Remove diagonal:
+            #
+            # [B, B] -> [B, B - 1]
+            # --------------------------------------------------------
+            non_diagonal = ~torch.eye(
+                B,
+                device=args.device,
+                dtype=torch.bool,
+            )
+
+            in_batch_scores = in_batch_scores[
+                non_diagonal
+            ].view(B, B - 1)
+
+            # Every remaining candidate is a negative.
+            in_batch_mask = torch.ones(
+                B,
+                B - 1,
+                device=args.device,
+                dtype=torch.bool,
+            )
+
+            # --------------------------------------------------------
+            # Prepend in-batch negatives
+            # --------------------------------------------------------
+            scores = torch.cat(
+                [
+                    in_batch_scores,
+                    scores,
+                ],
+                dim=1,
+            )
+
+            mask = torch.cat(
+                [
+                    in_batch_mask,
+                    mask,
+                ],
+                dim=1,
+            )
 
         return scores, mask
 
