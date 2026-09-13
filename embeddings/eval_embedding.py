@@ -968,7 +968,9 @@ def run_traverse(
     lang: str,
 ):
     """
-    Traverse the weight simplex and save results to CSV.
+    Traverse the weight simplex, save all results to CSV,
+    and print the configuration with the highest MRR
+    using the same PrettyTable format as normal evaluation.
     """
 
     test_data, test_emb = load_test_split(
@@ -1010,6 +1012,10 @@ def run_traverse(
         f"{lang}.csv"
     )
 
+    # ========================================================
+    # Save all traversal results
+    # ========================================================
+
     with open(
         output_path,
         "w",
@@ -1033,6 +1039,60 @@ def run_traverse(
         "Saved traversal results to %s",
         output_path,
     )
+
+    # ========================================================
+    # Find best MRR
+    # ========================================================
+
+    if not results:
+        logger.warning(
+            "No traversal results found for %s.",
+            lang,
+        )
+        return
+
+    best_row = max(
+        results,
+        key=lambda row: row[1],
+    )
+
+    best_weights = best_row[0]
+    best_mrr = best_row[1]
+    best_top1 = best_row[2]
+    best_top5 = best_row[3]
+    best_top10 = best_row[4]
+
+    # ========================================================
+    # PrettyTable
+    # ========================================================
+
+    table = ResultTable([
+        "weights",
+        "MRR",
+        "Top-1",
+        "Top-5",
+        "Top-10",
+    ])
+
+    table.add_row([
+        best_weights,
+        best_mrr,
+        best_top1,
+        best_top5,
+        best_top10,
+    ])
+
+    logger.info(
+        "Traversed %d weight configurations.",
+        len(results),
+    )
+
+    logger.info(
+        "\n===== Best MRR for %s =====",
+        lang,
+    )
+
+    table.print_table(logger)
 
 
 # ============================================================
